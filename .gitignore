@@ -2,3 +2,20 @@ venv
 __pycache__
 *.pyc
 *.pyo
+.env
+.env.*
+.DS_Store
+.vscode
+
+# Frontend
+node_modules
+.next
+web-ui/.next
+web-ui/node_modules
+
+# Python caches
+backend/__pycache__
+backend/app/__pycache__
+
+# Next.js
+next-env.d.ts
