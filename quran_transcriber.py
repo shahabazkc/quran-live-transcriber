@@ -1,18 +1,7 @@
 """
 quran_transcriber.py
 ─────────────────────
-Live Quran audio → Arabic transcription.
-
-Architecture
-────────────
-• ContinuousRecorder (from audio_utils) keeps the mic open in a daemon thread
-  at 44100 Hz — audio NEVER stops or restarts between chunks.
-• Every `chunk_secs` seconds a Streamlit rerun fires.  The main thread calls
-  recorder.snapshot_frames(chunk_secs) to grab the last N seconds of PCM,
-  resamples to 16 kHz, and feeds it to the Whisper pipeline — all while the
-  mic thread keeps recording without interruption.
-• On Stop the full accumulated PCM is encoded to a WAV at 44100 Hz for
-  download / playback.
+Live Quran audio → Arabic transcription driven by Voice Activity Detection.
 
 Usage
 ─────
@@ -28,11 +17,11 @@ from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq, pipeline
 from datetime import datetime
 
 from audio_utils import (
-    ContinuousRecorder,
+    VADRecorder,
     get_input_devices,
+    get_best_sample_rate,
     pcm_to_wav_bytes,
     pcm_frames_to_float32,
-    RECORD_RATE,
     WHISPER_RATE,
 )
 
@@ -51,16 +40,23 @@ html, body, [class*="css"] { font-family:'Syne',sans-serif; background:#0a0a0f; 
 .app-title { font-family:'Syne',sans-serif; font-weight:800; font-size:2.2rem;
              letter-spacing:-1px; color:#e8e4db; margin-bottom:2px; }
 .app-sub   { font-family:'Space Mono',monospace; font-size:0.7rem; color:#555;
-             letter-spacing:2px; text-transform:uppercase; margin-bottom:28px; }
+             letter-spacing:2px; text-transform:uppercase; margin-bottom:24px; }
 
 .pill { display:inline-block; padding:4px 14px; border-radius:999px;
         font-family:'Space Mono',monospace; font-size:0.68rem;
-        letter-spacing:1px; text-transform:uppercase; margin-bottom:18px; }
+        letter-spacing:1px; text-transform:uppercase; margin-bottom:14px; }
 .pill-idle      { background:#1a1a22; color:#555;    border:1px solid #2a2a35; }
-.pill-recording { background:#1a0a0a; color:#ff5555; border:1px solid #ff5555;
-                  animation:blink 1.2s ease-in-out infinite; }
+.pill-speech    { background:#0a1a2a; color:#55aaff; border:1px solid #55aaff;
+                  animation:blink 0.8s ease-in-out infinite; }
+.pill-silence   { background:#1a1a0a; color:#aaaa55; border:1px solid #888833; }
 .pill-done      { background:#0a1a0a; color:#55cc77; border:1px solid #55cc77; }
 @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+.level-wrap  { display:flex; align-items:center; gap:10px; margin-bottom:16px; }
+.level-label { font-family:'Space Mono',monospace; font-size:0.6rem; color:#444;
+               text-transform:uppercase; letter-spacing:1px; min-width:80px; }
+.level-bar-bg   { flex:1; height:6px; background:#1e1e28; border-radius:3px; }
+.level-bar-fill { height:6px; border-radius:3px; transition:width .1s ease; }
 
 .sec-label { font-family:'Space Mono',monospace; font-size:0.65rem; color:#444;
              letter-spacing:3px; text-transform:uppercase;
@@ -73,18 +69,17 @@ html, body, [class*="css"] { font-family:'Syne',sans-serif; background:#0a0a0f; 
 .arabic-full { font-family:'Amiri',serif; font-size:1.4rem; line-height:2.1;
                direction:rtl; text-align:right; color:#c8c0a8;
                background:#0e0e16; border:1px solid #1e1e28; border-radius:8px;
-               padding:18px 22px; min-height:120px; }
+               padding:18px 22px; min-height:140px; }
 .chunk-badge { font-family:'Space Mono',monospace; font-size:0.6rem; color:#333;
                text-align:left; direction:ltr; margin-top:6px; }
 
 .info-box { background:#131318; border:1px solid #2a2a35; border-radius:6px;
-            padding:12px 16px; margin-bottom:14px;
-            font-family:'Space Mono',monospace; font-size:0.68rem; color:#666; line-height:1.7; }
+            padding:12px 16px; margin-bottom:12px;
+            font-family:'Space Mono',monospace; font-size:0.67rem; color:#666; line-height:1.8; }
 
-.rec-card { background:#131318; border:1px solid #2a2a35; border-radius:6px;
-            padding:14px 18px; margin-bottom:10px; }
-.rec-name { font-weight:700; font-size:0.9rem; margin-bottom:3px; }
-.rec-meta { font-family:'Space Mono',monospace; font-size:0.65rem; color:#555; }
+.rate-badge { display:inline-block; padding:3px 10px; border-radius:4px;
+              background:#0a1a0a; border:1px solid #1a3a1a;
+              font-family:'Space Mono',monospace; font-size:0.63rem; color:#55cc77; }
 
 div.stButton > button {
     font-family:'Space Mono',monospace !important; font-size:0.74rem !important;
@@ -103,6 +98,11 @@ div[data-baseweb="select"] span  { color:#e8e4db !important; }
 .stSlider label, .stSelectbox label {
     font-family:'Space Mono',monospace !important; font-size:0.7rem !important; color:#666 !important; }
 
+.rec-card { background:#131318; border:1px solid #2a2a35; border-radius:6px;
+            padding:14px 18px; margin-bottom:10px; }
+.rec-name { font-weight:700; font-size:0.9rem; margin-bottom:3px; }
+.rec-meta { font-family:'Space Mono',monospace; font-size:0.65rem; color:#555; }
+
 section[data-testid="stSidebar"] { background:#0e0e16 !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -120,15 +120,15 @@ MODELS = {
 # ═══════════════════════════════════════════════════════════════════════════════
 # MODEL LOADER
 # ═══════════════════════════════════════════════════════════════════════════════
-@st.cache_resource(show_spinner="Loading model — this may take a minute…")
+@st.cache_resource(show_spinner="Loading model…")
 def load_model(model_name: str):
     device      = "cuda" if torch.cuda.is_available() else "cpu"
     torch_dtype = torch.float16 if device == "cuda" else torch.float32
     processor   = AutoProcessor.from_pretrained(model_name)
     model       = AutoModelForSpeechSeq2Seq.from_pretrained(
-        model_name, torch_dtype=torch_dtype, low_cpu_mem_usage=True
+        model_name, torch_dtype=torch_dtype, low_cpu_mem_usage=True,
     ).to(device)
-    pipe = pipeline(
+    return pipeline(
         "automatic-speech-recognition",
         model=model,
         tokenizer=processor.tokenizer,
@@ -137,14 +137,11 @@ def load_model(model_name: str):
         stride_length_s=5,
         device=device,
     )
-    return pipe
 
 
-def transcribe_audio(pipe, audio_np: np.ndarray) -> str:
-    result = pipe(
-        audio_np,
-        generate_kwargs={"language": "arabic", "task": "transcribe"},
-    )
+def transcribe_frames(pipe, frames: list[bytes], src_rate: int) -> str:
+    audio_np = pcm_frames_to_float32(frames, src_rate, WHISPER_RATE)
+    result   = pipe(audio_np, generate_kwargs={"language": "arabic", "task": "transcribe"})
     return result["text"].strip()
 
 
@@ -153,13 +150,13 @@ def transcribe_audio(pipe, audio_np: np.ndarray) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 defaults = {
     "recording":        False,
-    "recorder":         None,   # ContinuousRecorder instance
-    "chunks":           [],     # list of transcribed strings
+    "recorder":         None,
+    "chunks":           [],
     "latest_chunk_txt": "",
     "final_wav":        None,
     "final_duration":   0.0,
     "session_ts":       None,
-    "last_chunk_time":  0.0,    # time.monotonic() of last transcription trigger
+    "detected_rate":    None,   # shown in UI after start
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -169,12 +166,13 @@ for k, v in defaults.items():
 # SIDEBAR
 # ═══════════════════════════════════════════════════════════════════════════════
 sb = st.sidebar
-sb.markdown('<p style="font-family:Space Mono,monospace;font-size:.65rem;color:#444;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px">Model</p>', unsafe_allow_html=True)
-model_label = sb.selectbox("ASR Model", list(MODELS.keys()), label_visibility="collapsed")
+
+sb.markdown('<p style="font-family:Space Mono,monospace;font-size:.63rem;color:#444;letter-spacing:2px;text-transform:uppercase;margin-bottom:8px">Model</p>', unsafe_allow_html=True)
+model_label = sb.selectbox("Model", list(MODELS.keys()), label_visibility="collapsed")
 model_name  = MODELS[model_label]
 sb.markdown(f'<div class="info-box">📦 {model_name}</div>', unsafe_allow_html=True)
 
-sb.markdown('<p style="font-family:Space Mono,monospace;font-size:.65rem;color:#444;letter-spacing:2px;text-transform:uppercase;margin-top:16px;margin-bottom:8px">Microphone</p>', unsafe_allow_html=True)
+sb.markdown('<p style="font-family:Space Mono,monospace;font-size:.63rem;color:#444;letter-spacing:2px;text-transform:uppercase;margin-top:14px;margin-bottom:8px">Microphone</p>', unsafe_allow_html=True)
 devices = get_input_devices()
 if not devices:
     sb.error("No input devices found.")
@@ -182,16 +180,51 @@ if not devices:
 device_label = sb.selectbox("Mic", list(devices.keys()), label_visibility="collapsed")
 device_index = devices[device_label]
 
-sb.markdown('<p style="font-family:Space Mono,monospace;font-size:.65rem;color:#444;letter-spacing:2px;text-transform:uppercase;margin-top:16px;margin-bottom:4px">Transcription interval (s)</p>', unsafe_allow_html=True)
-chunk_secs = sb.slider("Chunk", min_value=3, max_value=10, value=6, step=1,
-                        label_visibility="collapsed",
-                        help="How many seconds of audio each transcription chunk covers.")
-sb.markdown(f'<div class="info-box">Mic records <b style="color:#f0d080">continuously</b>.<br>Transcription runs every <b style="color:#f0d080">{chunk_secs}s</b> in parallel.</div>', unsafe_allow_html=True)
+# Show detected sample rate for selected mic
+detected_rate = get_best_sample_rate(device_index)
+sb.markdown(
+    f'<div class="info-box">'
+    f'<span class="rate-badge">✓ {detected_rate} Hz</span> &nbsp; detected for this mic<br>'
+    f'<span style="color:#333;font-size:0.60rem;">WAV saved at this rate — correct playback guaranteed.</span>'
+    f'</div>',
+    unsafe_allow_html=True,
+)
 
-sb.markdown('<p style="font-family:Space Mono,monospace;font-size:.65rem;color:#444;letter-spacing:2px;text-transform:uppercase;margin-top:16px;margin-bottom:4px">Input gain</p>', unsafe_allow_html=True)
-gain = sb.slider("Gain", min_value=1.0, max_value=8.0, value=3.0, step=0.5,
-                 label_visibility="collapsed",
-                 help="Amplify mic input. 2–4× works well for most mics.")
+sb.markdown('<p style="font-family:Space Mono,monospace;font-size:.63rem;color:#444;letter-spacing:2px;text-transform:uppercase;margin-top:14px;margin-bottom:4px">Input gain</p>', unsafe_allow_html=True)
+gain = sb.slider("Gain", 1.0, 8.0, 3.0, 0.5, label_visibility="collapsed")
+
+sb.markdown('<p style="font-family:Space Mono,monospace;font-size:.63rem;color:#444;letter-spacing:2px;text-transform:uppercase;margin-top:18px;margin-bottom:6px">🎚 VAD Settings</p>', unsafe_allow_html=True)
+sb.markdown('<div class="info-box">Chunks split at natural <b style="color:#f0d080">pauses</b> — no fixed timer.</div>', unsafe_allow_html=True)
+
+silence_threshold = sb.slider(
+    "Silence threshold  (RMS)",
+    min_value=0.001, max_value=0.10, value=0.010, step=0.001, format="%.3f",
+    help="RMS below this = silence. Raise if noise keeps triggering; lower if soft voice is missed.",
+)
+min_silence_ms = sb.slider(
+    "Min pause duration  (ms)",
+    min_value=200, max_value=2000, value=600, step=50,
+    help="Gap must last this long to count as a chunk boundary.",
+)
+min_chunk_ms = sb.slider(
+    "Min chunk length  (ms)",
+    min_value=300, max_value=5000, value=800, step=100,
+    help="Chunks shorter than this are discarded.",
+)
+max_chunk_ms = sb.slider(
+    "Max chunk length  (ms)",
+    min_value=5000, max_value=60000, value=30000, step=1000, format="%d ms",
+    help="Hard ceiling — split even without a pause.",
+)
+
+sb.markdown(
+    f'<div class="info-box">'
+    f'Pause ≥ <b style="color:#f0d080">{min_silence_ms} ms</b> &nbsp;·&nbsp; '
+    f'RMS threshold <b style="color:#f0d080">{silence_threshold:.3f}</b><br>'
+    f'Min/Max chunk <b style="color:#f0d080">{min_chunk_ms} ms / {max_chunk_ms//1000} s</b>'
+    f'</div>',
+    unsafe_allow_html=True,
+)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # LOAD MODEL
@@ -202,21 +235,46 @@ pipe = load_model(model_name)
 # HEADER
 # ═══════════════════════════════════════════════════════════════════════════════
 st.markdown('<p class="app-title">📖 Quran Live Transcriber</p>', unsafe_allow_html=True)
-st.markdown('<p class="app-sub">Continuous mic · Chunked ASR · Whisper fine-tuned</p>', unsafe_allow_html=True)
+st.markdown('<p class="app-sub">Pause-triggered VAD · Continuous mic · Auto sample-rate detection</p>', unsafe_allow_html=True)
 
-if st.session_state.recording:
-    rec = st.session_state.recorder
-    dur = rec.duration_seconds() if rec else 0
-    st.markdown(f'<span class="pill pill-recording">● Recording — {dur:.0f}s captured</span>', unsafe_allow_html=True)
+# Status pill + level meter
+rec: VADRecorder | None = st.session_state.recorder
+
+if st.session_state.recording and rec:
+    rms       = rec.current_rms
+    is_speech = rec.is_speech
+    dur       = rec.duration_seconds()
+    emitted   = rec.chunks_emitted
+    rate_used = rec.record_rate
+
+    if is_speech:
+        st.markdown('<span class="pill pill-speech">🎙 Speaking…</span>', unsafe_allow_html=True)
+    else:
+        st.markdown('<span class="pill pill-silence">— Listening for voice…</span>', unsafe_allow_html=True)
+
+    pct       = min(rms / 0.10, 1.0) * 100
+    bar_color = "#55aaff" if is_speech else "#555"
+    st.markdown(
+        f'<div class="level-wrap">'
+        f'<span class="level-label">Level</span>'
+        f'<div class="level-bar-bg">'
+        f'<div class="level-bar-fill" style="width:{pct:.1f}%;background:{bar_color};"></div>'
+        f'</div>'
+        f'<span style="font-family:Space Mono,monospace;font-size:.6rem;color:#444;min-width:120px;">'
+        f'{rms:.4f} RMS &nbsp;·&nbsp; {dur:.0f}s &nbsp;·&nbsp; {emitted} chunk(s) &nbsp;·&nbsp; '
+        f'<span class="rate-badge">{rate_used} Hz</span></span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 elif st.session_state.final_wav:
     st.markdown('<span class="pill pill-done">✓ Session complete</span>', unsafe_allow_html=True)
 else:
     st.markdown('<span class="pill pill-idle">○ Ready</span>', unsafe_allow_html=True)
 
 st.markdown(
-    f'<p style="font-family:Space Mono,monospace;font-size:.65rem;color:#444;margin-bottom:18px;">'
+    f'<p style="font-family:Space Mono,monospace;font-size:.63rem;color:#3a3a4a;margin-bottom:18px;">'
     f'MODEL → {model_label} &nbsp;|&nbsp; MIC → {device_label.split("  (")[0]}'
-    f' &nbsp;|&nbsp; INTERVAL → {chunk_secs}s &nbsp;|&nbsp; GAIN → {gain}×</p>',
+    f' &nbsp;|&nbsp; GAIN → {gain}× &nbsp;|&nbsp; RATE → <span style="color:#55cc77">{detected_rate} Hz</span></p>',
     unsafe_allow_html=True,
 )
 
@@ -233,38 +291,44 @@ with c2:
 
 # ── Start ─────────────────────────────────────────────────────────────────────
 if start_clicked:
-    # Clean up old recorder if any
     if st.session_state.recorder:
         try:
             st.session_state.recorder.stop()
         except Exception:
             pass
 
-    rec = ContinuousRecorder(device_index=device_index, gain=gain, rate=RECORD_RATE)
-    rec.start()
+    new_rec = VADRecorder(
+        device_index      = device_index,
+        gain              = gain,
+        silence_threshold = silence_threshold,
+        min_silence_ms    = min_silence_ms,
+        min_chunk_ms      = min_chunk_ms,
+        max_chunk_ms      = max_chunk_ms,
+    )
+    new_rec.start()
 
     st.session_state.recording        = True
-    st.session_state.recorder         = rec
+    st.session_state.recorder         = new_rec
     st.session_state.chunks           = []
     st.session_state.latest_chunk_txt = ""
     st.session_state.final_wav        = None
     st.session_state.final_duration   = 0.0
     st.session_state.session_ts       = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    st.session_state.last_chunk_time  = time.monotonic()
+    st.session_state.detected_rate    = new_rec.record_rate
     st.rerun()
 
 # ── Stop ──────────────────────────────────────────────────────────────────────
 if stop_clicked:
     st.session_state.recording = False
-    rec = st.session_state.recorder
-    if rec:
-        all_frames = rec.all_frames       # grab before stopping
-        duration   = rec.duration_seconds()
-        rec.stop()
+    if st.session_state.recorder:
+        rec_rate   = st.session_state.recorder.record_rate
+        all_frames = st.session_state.recorder.stop()
+        duration   = len(all_frames) * 1024 / rec_rate
         if all_frames:
-            wav = pcm_to_wav_bytes(all_frames, RECORD_RATE)
-            st.session_state.final_wav      = wav
+            # WAV written at the ACTUAL capture rate — correct playback speed
+            st.session_state.final_wav      = pcm_to_wav_bytes(all_frames, rec_rate)
             st.session_state.final_duration = round(duration, 1)
+            st.session_state.detected_rate  = rec_rate
         else:
             st.warning("Nothing was recorded.")
     st.rerun()
@@ -275,11 +339,9 @@ st.markdown("---")
 # TRANSCRIPT DISPLAY
 # ═══════════════════════════════════════════════════════════════════════════════
 left_col, right_col = st.columns([1, 1], gap="large")
-
 with left_col:
     st.markdown('<p class="sec-label">Latest chunk</p>', unsafe_allow_html=True)
     live_ph = st.empty()
-
 with right_col:
     st.markdown('<p class="sec-label">Full transcript (all chunks)</p>', unsafe_allow_html=True)
     full_ph = st.empty()
@@ -293,12 +355,12 @@ def render_transcripts():
         count  = len(st.session_state.chunks)
         full_ph.markdown(
             f'<div class="arabic-full">{joined}</div>'
-            f'<p class="chunk-badge">{count} chunk(s) transcribed</p>',
+            f'<p class="chunk-badge">{count} chunk(s)</p>',
             unsafe_allow_html=True,
         )
     else:
         full_ph.markdown(
-            '<div class="arabic-full" style="color:#333;">Transcript appears here…</div>',
+            '<div class="arabic-full" style="color:#2a2a3a;">Transcript appears after first pause…</div>',
             unsafe_allow_html=True,
         )
 
@@ -306,46 +368,44 @@ def render_transcripts():
 render_transcripts()
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# LIVE TRANSCRIPTION LOOP
-# The mic thread is ALWAYS running — we just check the wall clock and when
-# chunk_secs have elapsed we grab a snapshot and transcribe it.
+# VAD POLL LOOP
 # ═══════════════════════════════════════════════════════════════════════════════
-if st.session_state.recording:
-    rec  = st.session_state.recorder
-    now  = time.monotonic()
-    elapsed = now - st.session_state.last_chunk_time
+if st.session_state.recording and st.session_state.recorder:
+    rec   = st.session_state.recorder
 
-    if elapsed >= chunk_secs:
-        # ── Transcribe the last chunk_secs of audio ───────────────────────────
-        frames = rec.snapshot_frames(chunk_secs)      # non-blocking read
-        if frames:
-            with st.spinner("Transcribing…"):
-                try:
-                    audio_np = pcm_frames_to_float32(frames, RECORD_RATE, WHISPER_RATE)
-                    text     = transcribe_audio(pipe, audio_np)
-                except Exception as e:
-                    text = f"[error: {e}]"
-            st.session_state.latest_chunk_txt = text
-            st.session_state.chunks.append(text)
-            st.session_state.last_chunk_time  = time.monotonic()
-            st.rerun()
-        else:
-            # Not enough audio yet — wait a little and rerun
-            time.sleep(0.5)
-            st.rerun()
+    # Check if the mic failed to open (e.g. BT headset disconnected)
+    if rec.open_error:
+        st.session_state.recording = False
+        st.error(
+            f"🎙️ Microphone error: **{rec.open_error}**\n\n"
+            f"The selected device is not available. "
+            f"Please check that your microphone / headset is connected and try again."
+        )
+        st.rerun()
+
+    chunk = rec.pop_ready_chunk()
+
+    if chunk:
+        with st.spinner("Transcribing…"):
+            try:
+                # Pass the actual record rate so resample is correct
+                text = transcribe_frames(pipe, chunk, rec.record_rate)
+            except Exception as e:
+                text = f"[error: {e}]"
+        st.session_state.latest_chunk_txt = text
+        st.session_state.chunks.append(text)
+        st.rerun()
     else:
-        # Wait out the rest of this chunk interval, then rerun
-        remaining = chunk_secs - elapsed
-        time.sleep(min(remaining, 1.0))   # sleep max 1 s so UI stays responsive
+        time.sleep(0.3)
         st.rerun()
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# RECORDED AUDIO + DOWNLOADS  (shown after Stop)
+# RECORDED AUDIO + DOWNLOADS
 # ═══════════════════════════════════════════════════════════════════════════════
 if st.session_state.final_wav:
     st.markdown("---")
     st.markdown('<p class="sec-label">Recorded audio</p>', unsafe_allow_html=True)
-
+    rate_used = st.session_state.detected_rate or "?"
     st.markdown(
         f'<div class="rec-card">'
         f'<div class="rec-name">Session recording</div>'
@@ -353,7 +413,8 @@ if st.session_state.final_wav:
         f'{st.session_state.session_ts}'
         f' &nbsp;·&nbsp; {st.session_state.final_duration}s'
         f' &nbsp;·&nbsp; {device_label.split("  (")[0]}'
-        f' &nbsp;·&nbsp; {RECORD_RATE} Hz &nbsp;·&nbsp; gain {gain}×'
+        f' &nbsp;·&nbsp; <span class="rate-badge">✓ {rate_used} Hz</span>'
+        f' &nbsp;·&nbsp; gain {gain}×'
         f'</div></div>',
         unsafe_allow_html=True,
     )
@@ -369,9 +430,7 @@ if st.session_state.final_wav:
             mime="audio/wav",
         )
     if st.session_state.chunks:
-        full_text = "\n".join(
-            f"[Chunk {i+1}] {t}" for i, t in enumerate(st.session_state.chunks)
-        )
+        full_text = "\n".join(f"[Chunk {i+1}] {t}" for i, t in enumerate(st.session_state.chunks))
         with d2:
             st.download_button(
                 "⬇ Download Transcript",
