@@ -16,6 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .audio import get_input_devices, get_best_sample_rate
 from .models import MODELS
+from .quran_content import list_surahs, load_surah
+from .recitation_ws import handle_recitation_ws
 from .ws_handler import handle_ws
 
 app = FastAPI(title="Quran Transcriber API", version="1.0.0")
@@ -51,6 +53,27 @@ async def list_models():
     }
 
 
+@app.get("/api/recitation/surahs")
+async def recitation_surahs():
+    return {"surahs": list_surahs()}
+
+
+@app.get("/api/recitation/surahs/{slug}")
+async def recitation_surah(slug: str):
+    data = load_surah(slug)
+    return {
+        "surah": data["surah"],
+        "indices": data.get("indices", {}),
+        "ayahs": data["ayahs"],
+        "total_words": data["total_words"],
+    }
+
+
 @app.websocket("/ws/transcribe")
 async def ws_transcribe(websocket: WebSocket):
     await handle_ws(websocket)
+
+
+@app.websocket("/ws/recitation")
+async def ws_recitation(websocket: WebSocket):
+    await handle_recitation_ws(websocket)

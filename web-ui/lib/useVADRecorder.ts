@@ -22,6 +22,8 @@ export interface VADConfig {
   minSilenceMs?: number;      // pause duration to trigger split (default 600)
   minChunkMs?: number;        // discard shorter utterances (default 800)
   maxChunkMs?: number;        // hard ceiling (default 30000)
+  emitOnMaxChunk?: boolean;   // if false, keep collecting on hard ceiling
+  forceEmitOnMaxChunk?: boolean; // if false, avoid mid-word forced cuts
 }
 
 export interface VADRecorderState {
@@ -42,6 +44,8 @@ export function useVADRecorder({
   minSilenceMs = 600,
   minChunkMs = 800,
   maxChunkMs = 30000,
+  emitOnMaxChunk = true,
+  forceEmitOnMaxChunk = true,
   sampleRate = 16000,
   onChunk,
 }: UseVADRecorderOptions) {
@@ -97,9 +101,16 @@ export function useVADRecorder({
           const raw = evt.data.pcm;
 
           // Apply gain
+          let peak = 0;
+          for (let i = 0; i < raw.length; i++) {
+            const a = Math.abs(raw[i]);
+            if (a > peak) peak = a;
+          }
+          // Prevent clipping distortion at high gain values.
+          const safeGain = peak > 0 ? Math.min(gain, 0.98 / peak) : gain;
           const boosted = new Float32Array(raw.length);
           for (let i = 0; i < raw.length; i++) {
-            boosted[i] = Math.max(-1, Math.min(1, raw[i] * gain));
+            boosted[i] = Math.max(-1, Math.min(1, raw[i] * safeGain));
           }
 
           allFramesRef.current.push(boosted);
@@ -119,8 +130,8 @@ export function useVADRecorder({
             vad.speechMs  += msPerFrame;
             vad.silenceMs  = 0;
 
-            // Hard ceiling — emit without waiting for silence
-            if (vad.speechMs >= maxChunkMs) {
+            // Hard ceiling (optional). If disabled, keep collecting until pause.
+            if (emitOnMaxChunk && forceEmitOnMaxChunk && vad.speechMs >= maxChunkMs) {
               const frames = [...vad.speechFrames];
               vad.speechFrames  = [];
               vad.silenceFrames = [];
@@ -190,7 +201,7 @@ export function useVADRecorder({
         throw err;
       }
     },
-    [gain, silenceThreshold, minSilenceMs, minChunkMs, maxChunkMs, sampleRate, onChunk]
+    [gain, silenceThreshold, minSilenceMs, minChunkMs, maxChunkMs, emitOnMaxChunk, forceEmitOnMaxChunk, sampleRate, onChunk]
   );
 
   const stopRecording = useCallback((): { wavBlob: Blob; sampleRate: number } | null => {

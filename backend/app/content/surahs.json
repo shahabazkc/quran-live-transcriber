@@ -1,0 +1,49 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-03-26",
+  "notes": "Global surah index. Add remaining surahs later in incremental order.",
+  "surahs": [
+    {
+      "id": 67,
+      "order": 67,
+      "slug": "surah-mulk",
+      "name_ar": "الملك",
+      "name_en": "Al-Mulk",
+      "ayah_count": 30,
+      "revelation_type": "Meccan",
+      "enabled": true,
+      "file_ref": "surah-mulk.json",
+      "indices": {
+        "juz": [29],
+        "hizb": [57, 58],
+        "rub_al_hizb": [225, 226, 227, 228]
+      },
+      "mushaf_page_ranges": {
+        "mushaf_standard_uthmani": {
+          "start_page": 562,
+          "end_page": 564
+        }
+      },
+      "translations_available": [
+        {
+          "lang": "en",
+          "code": "en_sahih_international",
+          "status": "planned"
+        },
+        {
+          "lang": "ur",
+          "code": "ur_jalandhry",
+          "status": "planned"
+        }
+      ]
+    }
+  ],
+  "expansion_templates": {
+    "mushaf_profiles": [
+      "mushaf_standard_uthmani",
+      "mushaf_indopak",
+      "mushaf_warsh"
+    ],
+    "translation_language_codes": ["ar", "en", "ur", "hi", "id"]
+  }
+}
