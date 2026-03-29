@@ -19,3 +19,6 @@ backend/app/__pycache__
 
 # Next.js
 next-env.d.ts
+
+# personal recordings
+audio/recordings/*

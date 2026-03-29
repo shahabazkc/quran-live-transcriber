@@ -45,7 +45,7 @@ async def handle_ws(websocket: WebSocket):
 
     # In-flight transcription tasks — we don't await them so the mic loop
     # continues unblocked while transcription runs concurrently.
-    pending: set[asyncio.Future] = set()
+    pending: set[asyncio.Task] = set()
 
     async def _send(obj: dict):
         try:
@@ -65,26 +65,18 @@ async def handle_ws(websocket: WebSocket):
 
         chunk_index += 1
         idx = chunk_index
-
         audio_np = pcm_frames_to_float32(raw_pcm, src_rate)
 
-        future = loop.run_in_executor(_executor, _run_transcribe, audio_np, idx)
-        pending.add(future)
+        async def _process_and_send():
+            try:
+                text, i = await loop.run_in_executor(_executor, _run_transcribe, audio_np, idx)
+                await _send({"type": "transcript", "text": text, "chunk_index": i})
+            except Exception as e:
+                await _send({"type": "error", "message": str(e)})
 
-        def _on_done(fut: asyncio.Future):
-            pending.discard(fut)
-            if fut.cancelled() or fut.exception():
-                err = fut.exception()
-                asyncio.run_coroutine_threadsafe(
-                    _send({"type": "error", "message": str(err)}), loop
-                )
-                return
-            text, i = fut.result()
-            asyncio.run_coroutine_threadsafe(
-                _send({"type": "transcript", "text": text, "chunk_index": i}), loop
-            )
-
-        future.add_done_callback(_on_done)
+        task = asyncio.create_task(_process_and_send())
+        pending.add(task)
+        task.add_done_callback(pending.discard)
 
     try:
         while True:
@@ -116,6 +108,46 @@ async def handle_ws(websocket: WebSocket):
                     await _send({"type": "error", "message": "Invalid base64 audio data"})
                     continue
                 await _dispatch_chunk(pcm_bytes, src_rate)
+
+            elif mtype == "offline_audio":
+                b64 = msg.get("data", "")
+                src_rate = int(msg.get("src_rate", 16000))
+                try:
+                    pcm_bytes = base64.b64decode(b64)
+                except Exception:
+                    await _send({"type": "error", "message": "Invalid base64 audio data"})
+                    continue
+
+                import librosa
+                import numpy as np
+                audio_np = pcm_frames_to_float32(pcm_bytes, src_rate, 16000)
+                
+                # Boost and normalize audio for maximum accuracy
+                peak = np.max(np.abs(audio_np))
+                if peak > 0.02:
+                    audio_np = np.clip(audio_np * (0.95 / peak), -1.0, 1.0)
+                
+                intervals = librosa.effects.split(audio_np, top_db=55)
+                
+                if len(intervals) == 0:
+                     await _send({"type": "error", "message": "No speech detected in audio."})
+                
+                MAX_LEN = 16000 * 25 # 25 seconds safely under 30s limit
+                
+                for start, end in intervals:
+                    # if the interval itself is > MAX_LEN, chunk it further
+                    pos = start
+                    while pos < end:
+                        chunk_end = min(pos + MAX_LEN, end)
+                        chunk_pcm = (np.clip(audio_np[pos:chunk_end], -1.0, 1.0) * 32767.5).astype(np.int16).tobytes()
+                        await _dispatch_chunk(chunk_pcm, 16000)
+                        pos += MAX_LEN
+
+            elif mtype == "finalize_batch":
+                # Wait for all in-flight transcriptions to finish, without disconnecting
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                await _send({"type": "batch_completed"})
 
             elif mtype == "stop":
                 # Wait for all in-flight transcriptions to finish

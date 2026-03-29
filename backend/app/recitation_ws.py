@@ -136,6 +136,12 @@ async def handle_recitation_ws(websocket: WebSocket):
                             "word_events": match["word_events"],
                             "completed_words": match["completed_words"],
                             "is_complete": match["is_complete"],
+                            "chunk_match_score": match.get("chunk_match_score"),
+                            "matched_words_count": match.get("matched_words_count"),
+                            "unmatched_words_count": match.get("unmatched_words_count"),
+                            "valid_word_count": match.get("valid_word_count"),
+                            "low_confidence": match.get("low_confidence"),
+                            "low_confidence_reason": match.get("low_confidence_reason"),
                         }
                     )
                 except Exception as exc:
@@ -170,7 +176,20 @@ async def handle_recitation_ws(websocket: WebSocket):
                 stopped = False
 
                 surah = load_surah(surah_slug)
-                matcher = RecitationMatcher(surah["flattened_words"])
+                matcher = RecitationMatcher(
+                    surah["flattened_words"],
+                    minimum_match_score_threshold=float(msg.get("minimum_match_score_threshold", 0.65)),
+                    forward_search_limit=int(msg.get("forward_search_limit", 10)),
+                    backward_search_limit=int(msg.get("backward_search_limit", 4)),
+                    minimum_words_for_matching=int(msg.get("minimum_words_for_matching", 5)),
+                    fuzzy_token_tolerance=float(msg.get("fuzzy_token_tolerance", 0.72)),
+                    phrase_detection_tolerance=float(msg.get("phrase_detection_tolerance", 0.74)),
+                    stop_words=msg.get("stop_words", ["ال", "الله", "الا"]),
+                    special_phrases=msg.get(
+                        "special_phrases",
+                        ["بسم الله الرحمن الرحيم", "اعوذ بالله من الشيطان الرجيم"],
+                    ),
+                )
                 await _switch_model(selected_model_id, gpu_index)
 
                 await _send(
@@ -225,6 +244,43 @@ async def handle_recitation_ws(websocket: WebSocket):
 
                 chunk_index += 1
                 await queue.put({"idx": chunk_index, "pcm": pcm, "src_rate": src_rate})
+                await _emit_queue_status()
+
+            elif mtype == "offline_audio":
+                if not accepting_audio:
+                    await _send(
+                        {
+                            "type": "error",
+                            "message": "Session is stopped. Send config to start again.",
+                        }
+                    )
+                    continue
+
+                b64 = msg.get("data", "")
+                src_rate = int(msg.get("src_rate", 16000))
+                try:
+                    pcm = base64.b64decode(b64)
+                except Exception:
+                    await _send({"type": "error", "message": "Invalid base64 audio data"})
+                    continue
+
+                import librosa
+                
+                # Convert to 16kHz float32 right away
+                audio_np = pcm_frames_to_float32(pcm, src_rate, 16000)
+                
+                # Split on silence, keeping only speech intervals
+                intervals = librosa.effects.split(audio_np, top_db=35)
+                
+                if len(intervals) == 0:
+                     await _send({"type": "error", "message": "No speech detected in audio."})
+                
+                for start, end in intervals:
+                    # Convert back to int16 bytes
+                    chunk_pcm = (np.clip(audio_np[start:end], -1.0, 1.0) * 32767.5).astype(np.int16).tobytes()
+                    chunk_index += 1
+                    await queue.put({"idx": chunk_index, "pcm": chunk_pcm, "src_rate": 16000})
+
                 await _emit_queue_status()
 
             elif mtype == "stop":

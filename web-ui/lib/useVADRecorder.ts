@@ -24,6 +24,10 @@ export interface VADConfig {
   maxChunkMs?: number;        // hard ceiling (default 30000)
   emitOnMaxChunk?: boolean;   // if false, keep collecting on hard ceiling
   forceEmitOnMaxChunk?: boolean; // if false, avoid mid-word forced cuts
+  preSpeechMs?: number;
+  postSpeechMs?: number;
+  noiseSuppression?: boolean;
+  echoCancellation?: boolean;
 }
 
 export interface VADRecorderState {
@@ -46,6 +50,10 @@ export function useVADRecorder({
   maxChunkMs = 30000,
   emitOnMaxChunk = true,
   forceEmitOnMaxChunk = true,
+  preSpeechMs = 600,
+  postSpeechMs = 220,
+  noiseSuppression = true,
+  echoCancellation = true,
   sampleRate = 16000,
   onChunk,
 }: UseVADRecorderOptions) {
@@ -78,8 +86,13 @@ export function useVADRecorder({
       try {
         const constraints: MediaStreamConstraints = {
           audio: deviceId
-            ? { deviceId: { exact: deviceId }, channelCount: 1, echoCancellation: false, noiseSuppression: false }
-            : { channelCount: 1, echoCancellation: false, noiseSuppression: false },
+            ? {
+                deviceId: { exact: deviceId },
+                channelCount: 1,
+                echoCancellation,
+                noiseSuppression,
+              }
+            : { channelCount: 1, echoCancellation, noiseSuppression },
         };
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
         streamRef.current = stream;
@@ -94,8 +107,9 @@ export function useVADRecorder({
         workletRef.current = worklet;
 
         const msPerFrame = (FRAMES_PER_BUFFER / ctx.sampleRate) * 1000;
-        const maxPreFrames = Math.ceil(500 / msPerFrame);
-        const leadInFrames = Math.ceil(200 / msPerFrame);
+        const maxPreFrames = Math.ceil(preSpeechMs / msPerFrame);
+        const leadInFrames = Math.ceil((preSpeechMs * 0.4) / msPerFrame);
+        const postPadFrames = Math.ceil(postSpeechMs / msPerFrame);
 
         worklet.port.onmessage = (evt: MessageEvent<{ pcm: Float32Array }>) => {
           const raw = evt.data.pcm;
@@ -157,7 +171,7 @@ export function useVADRecorder({
                 const totalMs =
                   (vad.speechFrames.length + vad.silenceFrames.length) * msPerFrame;
                 if (totalMs >= minChunkMs) {
-                  const frames = [...vad.speechFrames, ...vad.silenceFrames];
+                  const frames = [...vad.speechFrames, ...vad.silenceFrames.slice(0, postPadFrames)];
                   vad.chunksEmitted++;
                   const count = vad.chunksEmitted;
                   setState((s) => ({ ...s, isSpeaking: false, rmsLevel: rms, chunksEmitted: count }));
@@ -201,7 +215,21 @@ export function useVADRecorder({
         throw err;
       }
     },
-    [gain, silenceThreshold, minSilenceMs, minChunkMs, maxChunkMs, emitOnMaxChunk, forceEmitOnMaxChunk, sampleRate, onChunk]
+    [
+      gain,
+      silenceThreshold,
+      minSilenceMs,
+      minChunkMs,
+      maxChunkMs,
+      emitOnMaxChunk,
+      forceEmitOnMaxChunk,
+      preSpeechMs,
+      postSpeechMs,
+      noiseSuppression,
+      echoCancellation,
+      sampleRate,
+      onChunk,
+    ]
   );
 
   const stopRecording = useCallback((): { wavBlob: Blob; sampleRate: number } | null => {

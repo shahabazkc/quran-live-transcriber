@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import { SurahAyah } from "@/lib/recitationApi";
 import { WordEvent } from "@/lib/useRecitationSocket";
 
@@ -20,10 +21,39 @@ function stateClasses(state: WordState): string {
 interface AyahTimelineProps {
   ayahs: SurahAyah[];
   events: WordEvent[];
+  activeAyahIndex?: number | null;
 }
 
-export default function AyahTimeline({ ayahs, events }: AyahTimelineProps) {
+export default function AyahTimeline({ ayahs, events, activeAyahIndex }: AyahTimelineProps) {
   const statusMap = new Map<string, WordState>();
+  const ayahRefs = useRef<Record<number, HTMLDivElement | null>>({});
+  const userScrollLockUntil = useRef<number>(0);
+
+  useEffect(() => {
+    const markManualScroll = () => {
+      userScrollLockUntil.current = Date.now() + 1200;
+    };
+    window.addEventListener("wheel", markManualScroll, { passive: true });
+    window.addEventListener("touchmove", markManualScroll, { passive: true });
+    return () => {
+      window.removeEventListener("wheel", markManualScroll);
+      window.removeEventListener("touchmove", markManualScroll);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!activeAyahIndex) return;
+    if (Date.now() < userScrollLockUntil.current) return;
+    const target = ayahRefs.current[activeAyahIndex];
+    if (!target) return;
+
+    const rect = target.getBoundingClientRect();
+    const inView = rect.top >= 72 && rect.bottom <= window.innerHeight - 48;
+    if (!inView) {
+      target.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+    }
+  }, [activeAyahIndex]);
+
   for (const ev of events) {
     if (ev.status === "current" || ev.status === "predicted_next" || ev.status === "mispronounced" || ev.status === "correct") {
       statusMap.set(keyFor(ev.ayah_index, ev.word_index), ev.status);
@@ -33,7 +63,13 @@ export default function AyahTimeline({ ayahs, events }: AyahTimelineProps) {
   return (
     <div className="flex flex-col gap-4">
       {ayahs.map((ayah) => (
-        <div key={ayah.ayah_index} className="border border-[#1f2330] rounded-lg p-4 bg-[#0e1018]">
+        <div
+          key={ayah.ayah_index}
+          ref={(node) => {
+            ayahRefs.current[ayah.ayah_index] = node;
+          }}
+          className="border border-[#1f2330] rounded-lg p-4 bg-[#0e1018]"
+        >
           <div className="font-mono text-[0.62rem] text-[#7e859a] mb-2">Ayah {ayah.ayah_index}</div>
           <div dir="rtl" className="leading-9 flex flex-wrap gap-2 justify-start">
             {ayah.words.map((word) => {

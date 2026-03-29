@@ -7,6 +7,10 @@ export interface VADSettings {
   minSilenceMs: number;
   minChunkMs: number;
   maxChunkMs: number;
+  preSpeechMs?: number;
+  postSpeechMs?: number;
+  noiseSuppression?: boolean;
+  echoCancellation?: boolean;
 }
 
 interface VADControlsProps {
@@ -98,6 +102,46 @@ export default function VADControls({ settings, onChange, disabled }: VADControl
             onChange={(v) => set({ maxChunkMs: v })}
             disabled={disabled}
           />
+          <Slider
+            label="Pre-speech buffer (ms)"
+            value={settings.preSpeechMs ?? 500}
+            min={100}
+            max={1500}
+            step={50}
+            format={(v) => `${v} ms`}
+            onChange={(v) => set({ preSpeechMs: v })}
+            disabled={disabled}
+          />
+          <Slider
+            label="Post-speech buffer (ms)"
+            value={settings.postSpeechMs ?? 200}
+            min={50}
+            max={1000}
+            step={25}
+            format={(v) => `${v} ms`}
+            onChange={(v) => set({ postSpeechMs: v })}
+            disabled={disabled}
+          />
+          <div className="mt-3 grid grid-cols-1 gap-2">
+            <label className="font-mono text-[0.62rem] text-[#777] flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={settings.noiseSuppression ?? true}
+                onChange={(e) => set({ noiseSuppression: e.target.checked })}
+                disabled={disabled}
+              />
+              Noise suppression
+            </label>
+            <label className="font-mono text-[0.62rem] text-[#777] flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={settings.echoCancellation ?? true}
+                onChange={(e) => set({ echoCancellation: e.target.checked })}
+                disabled={disabled}
+              />
+              Echo cancellation
+            </label>
+          </div>
           <div className="mt-2 p-2 bg-[#131318] rounded text-[0.6rem] font-mono text-[#444] leading-relaxed">
             Pause ≥ <span className="text-[#f0d080]">{settings.minSilenceMs} ms</span>
             &nbsp;·&nbsp; threshold <span className="text-[#f0d080]">{settings.silenceThreshold.toFixed(3)}</span>
@@ -106,6 +150,10 @@ export default function VADControls({ settings, onChange, disabled }: VADControl
             {" / "}
             <span className="text-[#f0d080]">{(settings.maxChunkMs / 1000).toFixed(0)} s</span>
             &nbsp;·&nbsp; gain <span className="text-[#f0d080]">{settings.gain}×</span>
+            <br />
+            Pre/Post: <span className="text-[#f0d080]">{settings.preSpeechMs ?? 500} ms</span>
+            {" / "}
+            <span className="text-[#f0d080]">{settings.postSpeechMs ?? 200} ms</span>
           </div>
         </div>
       )}

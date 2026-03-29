@@ -20,6 +20,10 @@ const WORDWISE_VAD: VADSettings = {
   minSilenceMs: 240,
   minChunkMs: 280,
   maxChunkMs: 4000,
+  preSpeechMs: 650,
+  postSpeechMs: 260,
+  noiseSuppression: true,
+  echoCancellation: true,
 };
 
 export default function RecitationPage() {
@@ -42,6 +46,9 @@ export default function RecitationPage() {
   const [pendingQueue, setPendingQueue] = useState(0);
   const [globalSlots, setGlobalSlots] = useState<{ cap?: number; available?: number }>({});
   const [matchScore, setMatchScore] = useState<number | null>(null);
+  const [chunkMatchedWords, setChunkMatchedWords] = useState<number>(0);
+  const [chunkUnmatchedWords, setChunkUnmatchedWords] = useState<number>(0);
+  const [activeAyahIndex, setActiveAyahIndex] = useState<number | null>(null);
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startTsRef = useRef<number>(0);
@@ -88,6 +95,7 @@ export default function RecitationPage() {
     onProgress: (payload) => {
       setLatestTranscript(payload.transcript_text);
       setEvents(payload.word_events);
+      setActiveAyahIndex(payload.current_position?.ayah_index ?? null);
       setPersistentWordEvents((prev) => {
         const next = { ...prev };
         for (const ev of payload.word_events) {
@@ -98,8 +106,9 @@ export default function RecitationPage() {
         }
         return next;
       });
-      const scored = payload.word_events.find((ev) => typeof ev.match_score === "number");
-      setMatchScore(typeof scored?.match_score === "number" ? scored.match_score : null);
+      setMatchScore(typeof payload.chunk_match_score === "number" ? payload.chunk_match_score : null);
+      setChunkMatchedWords(payload.matched_words_count ?? 0);
+      setChunkUnmatchedWords(payload.unmatched_words_count ?? 0);
     },
     onSummary: (payload) => {
       setSummary(payload);
@@ -139,6 +148,10 @@ export default function RecitationPage() {
     setPersistentWordEvents({});
     setLatestTranscript("");
     setWavBlob(null);
+    setMatchScore(null);
+    setChunkMatchedWords(0);
+    setChunkUnmatchedWords(0);
+    setActiveAyahIndex(null);
     setSessionTs(new Date().toLocaleString());
 
     await connect({
@@ -149,6 +162,16 @@ export default function RecitationPage() {
       max_batch_size: 1,
       process_interval_ms: 0,
       min_voice_rms: 0.0005,
+      matcher_config: {
+        minimum_match_score_threshold: 0.65,
+        forward_search_limit: 10,
+        backward_search_limit: 4,
+        minimum_words_for_matching: 1,
+        fuzzy_token_tolerance: 0.72,
+        phrase_detection_tolerance: 0.74,
+        stop_words: ["ال", "الله", "الا"],
+        special_phrases: ["بسم الله الرحمن الرحيم", "اعوذ بالله من الشيطان الرجيم"],
+      },
     });
     await startRecording(micId || undefined);
 
@@ -184,6 +207,11 @@ export default function RecitationPage() {
     return [...sticky, ...transient];
   }, [persistentWordEvents, events]);
 
+  const totalWrongWords = useMemo(
+    () => Object.values(persistentWordEvents).filter((ev) => ev.status === "mispronounced").length,
+    [persistentWordEvents]
+  );
+
   return (
     <div className="flex min-h-screen bg-[#0a0a0f]">
       <aside className="w-80 shrink-0 bg-[#0e0e16] border-r border-[#1e1e28] p-5 flex flex-col gap-5">
@@ -216,7 +244,11 @@ export default function RecitationPage() {
             Surah: {surahSlug} | Total words: {sessionTotalWords} | WS: {wsStatus}
           </p>
           <p className="font-mono text-[0.62rem] text-[#777b8b] mt-1">
-            Queue pending: {pendingQueue} | Global slots: {globalSlots.available ?? "-"} / {globalSlots.cap ?? "-"} | Match score: {matchScore ?? "-"}
+            Queue pending: {pendingQueue} | Global slots: {globalSlots.available ?? "-"} / {globalSlots.cap ?? "-"} | Match score:{" "}
+            {matchScore ?? "-"}
+          </p>
+          <p className="font-mono text-[0.62rem] text-[#777b8b] mt-1">
+            Wrong words: {totalWrongWords} | Matched vs unmatched: {chunkMatchedWords} / {chunkUnmatchedWords}
           </p>
           <p className="font-mono text-[0.62rem] text-[#777b8b] mt-1">Inference device: {runtimeDevice}</p>
         </div>
@@ -245,6 +277,14 @@ export default function RecitationPage() {
           </button>
         </div>
 
+        {audioUrl && (
+          <div className="bg-[#101522] border border-[#1e2b45] rounded p-3 mt-4">
+            <p className="font-mono text-[0.6rem] text-[#8ea1c9] uppercase tracking-widest mb-1">Session audio</p>
+            <p className="font-mono text-[0.62rem] text-[#777b8b] mb-2">{sessionTs}</p>
+            <audio controls src={audioUrl} className="w-full" />
+          </div>
+        )}
+
         <div className="bg-[#101522] border border-[#1e2b45] rounded p-3">
           <p className="font-mono text-[0.6rem] text-[#8ea1c9] uppercase tracking-widest mb-1">Live transcript chunk</p>
           <p className="font-[var(--font-amiri)] text-xl">{latestTranscript || "—"}</p>
@@ -254,7 +294,7 @@ export default function RecitationPage() {
           Legend: <span className="text-[#dce8ff]">Current</span> · <span className="text-[#b6c7f0]">Next predicted</span> · <span className="text-[#ffb4b4]">Mispronounced (●)</span>
         </div>
 
-        <AyahTimeline ayahs={ayahs} events={displayEvents} />
+        <AyahTimeline ayahs={ayahs} events={displayEvents} activeAyahIndex={activeAyahIndex} />
 
         {summary && (
           <div className="bg-[#12191f] border border-[#2a3d52] rounded p-3 font-mono text-[0.68rem]">
@@ -262,13 +302,7 @@ export default function RecitationPage() {
           </div>
         )}
 
-        {audioUrl && (
-          <div className="bg-[#101522] border border-[#1e2b45] rounded p-3">
-            <p className="font-mono text-[0.6rem] text-[#8ea1c9] uppercase tracking-widest mb-1">Session audio</p>
-            <p className="font-mono text-[0.62rem] text-[#777b8b] mb-2">{sessionTs}</p>
-            <audio controls src={audioUrl} className="w-full" />
-          </div>
-        )}
+
       </main>
     </div>
   );

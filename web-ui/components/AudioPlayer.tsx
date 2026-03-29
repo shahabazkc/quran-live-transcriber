@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo } from "react";
 
 interface AudioPlayerProps {
   wavBlob: Blob | null;
@@ -8,23 +8,21 @@ interface AudioPlayerProps {
 }
 
 export default function AudioPlayer({ wavBlob, sessionTimestamp, chunks }: AudioPlayerProps) {
-  const urlRef = useRef<string | null>(null);
+  const audioUrl = useMemo(() => (wavBlob ? URL.createObjectURL(wavBlob) : null), [wavBlob]);
 
   useEffect(() => {
-    if (wavBlob) {
-      urlRef.current = URL.createObjectURL(wavBlob);
-      return () => {
-        if (urlRef.current) URL.revokeObjectURL(urlRef.current);
-      };
-    }
-  }, [wavBlob]);
+    return () => {
+      if (audioUrl) URL.revokeObjectURL(audioUrl);
+    };
+  }, [audioUrl]);
 
   if (!wavBlob) return null;
 
   const safeTs = sessionTimestamp.replace(/:/g, "-").replace(/ /g, "_");
   const downloadWav = () => {
+    if (!audioUrl) return;
     const a = document.createElement("a");
-    a.href = urlRef.current!;
+    a.href = audioUrl;
     a.download = `quran_${safeTs}.wav`;
     a.click();
   };
@@ -47,8 +45,8 @@ export default function AudioPlayer({ wavBlob, sessionTimestamp, chunks }: Audio
         <p className="font-semibold text-sm mb-1">Session recording</p>
         <p className="font-mono text-[0.63rem] text-[#555]">{sessionTimestamp}</p>
       </div>
-      {urlRef.current && (
-        <audio controls src={urlRef.current} className="w-full mb-4" />
+      {audioUrl && (
+        <audio controls src={audioUrl} className="w-full mb-4" />
       )}
       <div className="flex gap-3">
         <button

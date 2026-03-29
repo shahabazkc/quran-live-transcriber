@@ -32,6 +32,23 @@ export interface ProgressPayload {
   word_events: WordEvent[];
   completed_words: number;
   is_complete: boolean;
+  chunk_match_score?: number | null;
+  matched_words_count?: number;
+  unmatched_words_count?: number;
+  valid_word_count?: number;
+  low_confidence?: boolean;
+  low_confidence_reason?: string;
+}
+
+export interface RecitationMatcherConfig {
+  minimum_match_score_threshold?: number;
+  forward_search_limit?: number;
+  backward_search_limit?: number;
+  minimum_words_for_matching?: number;
+  fuzzy_token_tolerance?: number;
+  phrase_detection_tolerance?: number;
+  stop_words?: string[];
+  special_phrases?: string[];
 }
 
 interface UseRecitationSocketOptions {
@@ -73,6 +90,7 @@ export function useRecitationSocket({
       max_batch_size?: number;
       process_interval_ms?: number;
       min_voice_rms?: number;
+      matcher_config?: RecitationMatcherConfig;
     }): Promise<void> =>
       new Promise((resolve, reject) => {
         if (wsRef.current && wsRef.current.readyState <= WebSocket.OPEN) {
@@ -96,6 +114,7 @@ export function useRecitationSocket({
               max_batch_size: params.max_batch_size ?? 1,
               process_interval_ms: params.process_interval_ms ?? 0,
               min_voice_rms: params.min_voice_rms ?? 0.001,
+              ...(params.matcher_config ?? {}),
             })
           );
         };
@@ -153,6 +172,12 @@ export function useRecitationSocket({
     ws.send(JSON.stringify({ type: "audio_chunk", data: base64, src_rate: srcRate }));
   }, []);
 
+  const sendOfflineAudio = useCallback((base64: string, srcRate: number) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "offline_audio", data: base64, src_rate: srcRate }));
+  }, []);
+
   const sendStop = useCallback(() => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -165,5 +190,5 @@ export function useRecitationSocket({
     setStatus("disconnected");
   }, []);
 
-  return { status, connect, sendChunk, sendStop, disconnect };
+  return { status, connect, sendChunk, sendOfflineAudio, sendStop, disconnect };
 }

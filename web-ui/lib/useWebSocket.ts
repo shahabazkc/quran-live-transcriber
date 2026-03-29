@@ -5,7 +5,7 @@
  * Designed for concurrent operation — sendChunk() is fire-and-forget;
  * the connection stays open and keeps receiving transcripts independently.
  */
-import { useRef, useState, useCallback } from "react";
+import { useRef, useState, useCallback, useEffect } from "react";
 
 export type WsStatus = "disconnected" | "connecting" | "connected" | "error";
 
@@ -18,6 +18,7 @@ interface UseWebSocketOptions {
   url?: string;
   onTranscript: (msg: TranscriptMessage) => void;
   onReady?: () => void;
+  onBatchCompleted?: () => void;
   onError?: (message: string) => void;
 }
 
@@ -25,10 +26,17 @@ export function useWebSocket({
   url = "ws://localhost:8000/ws/transcribe",
   onTranscript,
   onReady,
+  onBatchCompleted,
   onError,
 }: UseWebSocketOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const [status, setStatus] = useState<WsStatus>("disconnected");
+
+  // Keep mutable references to callbacks to avoid triggering `connect` effects on every render
+  const callbacksRef = useRef({ onTranscript, onReady, onBatchCompleted, onError });
+  useEffect(() => {
+    callbacksRef.current = { onTranscript, onReady, onBatchCompleted, onError };
+  });
 
   const connect = useCallback(
     (model: string): Promise<void> => {
@@ -50,12 +58,14 @@ export function useWebSocket({
           try {
             const msg = JSON.parse(evt.data);
             if (msg.type === "ready") {
-              onReady?.();
+              callbacksRef.current.onReady?.();
               resolve();
             } else if (msg.type === "transcript") {
-              onTranscript({ text: msg.text, chunkIndex: msg.chunk_index });
+              callbacksRef.current.onTranscript({ text: msg.text, chunkIndex: msg.chunk_index });
+            } else if (msg.type === "batch_completed") {
+              callbacksRef.current.onBatchCompleted?.();
             } else if (msg.type === "error") {
-              onError?.(msg.message);
+              callbacksRef.current.onError?.(msg.message);
             }
           } catch {
             // ignore parse errors
@@ -64,7 +74,7 @@ export function useWebSocket({
 
         ws.onerror = () => {
           setStatus("error");
-          onError?.("WebSocket connection failed");
+          callbacksRef.current.onError?.("WebSocket connection failed");
           reject(new Error("WebSocket connection failed"));
         };
 
@@ -73,7 +83,7 @@ export function useWebSocket({
         };
       });
     },
-    [url, onTranscript, onReady, onError]
+    [url] // dependency strictly on primitive 'url'
   );
 
   /** Fire-and-forget: send a base64 PCM chunk. Mic keeps running. */
@@ -81,6 +91,18 @@ export function useWebSocket({
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify({ type: "audio_chunk", data: base64, src_rate: srcRate }));
+  }, []);
+
+  const sendOfflineAudio = useCallback((base64: string, srcRate: number) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "offline_audio", data: base64, src_rate: srcRate }));
+  }, []);
+
+  const sendFinalizeBatch = useCallback(() => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: "finalize_batch" }));
   }, []);
 
   const sendStop = useCallback(() => {
@@ -95,5 +117,5 @@ export function useWebSocket({
     setStatus("disconnected");
   }, []);
 
-  return { status, connect, sendChunk, sendStop, disconnect };
+  return { status, connect, sendChunk, sendOfflineAudio, sendFinalizeBatch, sendStop, disconnect };
 }
