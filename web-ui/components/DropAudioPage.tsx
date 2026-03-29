@@ -18,7 +18,7 @@ function arrayBufferToBase64(buffer: ArrayBuffer) {
 }
 
 export default function DropAudioPage() {
-  const [model, setModel] = useState("Whisper Medium — Quran fine-tune");
+  const [model, setModel] = useState("Faster: Whisper Medium — Quran fine-tune");
   const [errorMsg, setErrorMsg] = useState("");
   
   const [audioUrl, setAudioUrl] = useState<string>("");

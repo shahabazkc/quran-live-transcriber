@@ -32,7 +32,7 @@ const DEFAULT_VAD: VADSettings = {
 
 export default function TranscriberPage() {
   const [micId, setMicId]       = useState("");
-  const [model, setModel]       = useState("Whisper Medium — Quran fine-tune");
+  const [model, setModel]       = useState("Faster: Whisper Medium — Quran fine-tune");
   const [vad, setVad]           = useState<VADSettings>(DEFAULT_VAD);
   const [pillState, setPill]    = useState<PillState>("idle");
   const [latestChunk, setLatest] = useState("");

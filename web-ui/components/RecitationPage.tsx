@@ -27,7 +27,7 @@ const WORDWISE_VAD: VADSettings = {
 };
 
 export default function RecitationPage() {
-  const [model, setModel] = useState("Whisper Medium — Quran fine-tune");
+  const [model, setModel] = useState("Faster: Whisper Medium — Quran fine-tune");
   const [micId, setMicId] = useState("");
   const [vad, setVad] = useState<VADSettings>(WORDWISE_VAD);
   const [surahs, setSurahs] = useState<SurahSummary[]>([]);

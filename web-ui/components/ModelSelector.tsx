@@ -1,10 +1,12 @@
 "use client";
 
 const MODELS = [
-  { label: "Whisper Medium — Quran fine-tune",         id: "shahabazkc10/whisper-medium-ar-quran-mix-norm" },
-  { label: "Whisper Small — Quran fine-tune",          id: "shahabazkc10/whisper-small-ar-quran-mix-norm" },
-  { label: "Whisper Large-v3 — OpenAI baseline",       id: "openai/whisper-large-v3" },
-  { label: "Whisper Large-v3-Turbo — Quran fine-tune", id: "shahabazkc10/whisper-large-v3-turbo-ar-quran-mix-norm" },
+  { label: "Faster: Whisper Medium — Quran fine-tune",       id: "faster:shahabazkc10/whisper-medium-ar-quran-mix-norm" },
+  { label: "Faster: Whisper Small — Quran fine-tune",        id: "faster:shahabazkc10/whisper-small-ar-quran-mix-norm" },
+  { label: "Faster: Whisper Large-v3-Turbo — Quran",         id: "faster:shahabazkc10/whisper-large-v3-turbo-ar-quran-mix-norm" },
+  { label: "Transformers: Whisper Medium — Quran fine-tune", id: "transformers:shahabazkc10/whisper-medium-ar-quran-mix-norm" },
+  { label: "Transformers: Whisper Small — Quran fine-tune",  id: "transformers:shahabazkc10/whisper-small-ar-quran-mix-norm" },
+  { label: "Transformers: Whisper Large-v3 — OpenAI",        id: "transformers:openai/whisper-large-v3" },
 ];
 
 interface ModelSelectorProps {
